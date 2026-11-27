@@ -25,12 +25,79 @@ jobs:
         ports:
           - 5432:5432
         options: >-
- --health-cmd "pg_isready -U trader_pro -d trader_pro_test"
+          --health-cmd "pg_isready -U trader_pro -d trader_pro_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-        env:
-          TRADER_PRO_TEST_DATABASE_URL: postgresql+psycopg://trader_pro:ci_only_password@127.0.0.1:5432/trader_pro_test
-          TRADER_PRO_TEST_DATABASE_DISPOSABLE: "YES"
-          TRADER_PRO_RESTORE_DATABASE_URL: postgresql+psycopg://trader_pro:ci_only_password@127.0.0.1:5432/trader_pro_restore
-          PGPASSWORD: ci_only_password
+    env:
+      TRADER_PRO_TEST_DATABASE_URL: postgresql+psycopg://trader_pro:ci_only_password@127.0.0.1:5432/trader_pro_test
+      TRADER_PRO_TEST_DATABASE_DISPOSABLE: "YES"
+      TRADER_PRO_RESTORE_DATABASE_URL: postgresql+psycopg://trader_pro:ci_only_password@127.0.0.1:5432/trader_pro_restore
+      PGPASSWORD: ci_only_password
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Verify R99 archive and extract baseline source
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$GITHUB_WORKSPACE/Trader-Pro-2.0-R99-neon-cloud-preflight-2026-11-26.zip"
+          echo "0c7fd14d173db29080786a8397ef736584ab9792d273a4ff677ddc6844a3740d  $archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/trader-pro-r99"
+          unzip -q "$archive" -d "$RUNNER_TEMP/trader-pro-r99"
+          test -f "$RUNNER_TEMP/trader-pro-r99/alembic.ini"
+          test -f "$RUNNER_TEMP/trader-pro-r99/scripts/verify_postgres.sh"
+          test -f "$RUNNER_TEMP/trader-pro-r99/tests/test_postgres_integration.py"
+          echo "TRADER_PRO_SOURCE=$RUNNER_TEMP/trader-pro-r99" >> "$GITHUB_ENV"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install source dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r "$TRADER_PRO_SOURCE/requirements-dev.txt"
+
+      - name: Install PostgreSQL client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Wait for database and create empty restore target
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            pg_isready -h 127.0.0.1 -p 5432 -U trader_pro -d trader_pro_test && break
+            sleep 2
+          done
+          createdb --host=127.0.0.1 --port=5432 --username=trader_pro trader_pro_restore
+
+      - name: Run online Alembic, real PostgreSQL tests, pg_dump and pg_restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TRADER_PRO_SOURCE"
+          bash scripts/verify_postgres.sh 2>&1 | tee "$GITHUB_WORKSPACE/postgres-r99-validation.log"
+
+      - name: Run complete baseline regression suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TRADER_PRO_SOURCE"
+          python -m pytest -q
+          python -m unittest discover -q
+          python -m compileall -q .
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trader-pro-r99-postgres-baseline
+          path: postgres-r99-validation.log
+          if-no-files-found: warn
+          retention-days: 14
