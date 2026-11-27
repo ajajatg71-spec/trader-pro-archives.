@@ -25,7 +25,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U trader_pro -d trader_pro_test"
+ --health-cmd "pg_isready -U trader_pro -d trader_pro_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -38,7 +38,7 @@ jobs:
       - name: Checkout branch
         uses: actions/checkout@v4
 
-      - name: Verify R99 archive and extract baseline source
+      - name: Verify R99 archive, extract baseline and apply isolated test fixes
         shell: bash
         run: |
           set -euo pipefail
@@ -46,6 +46,7 @@ jobs:
           echo "0c7fd14d173db29080786a8397ef736584ab9792d273a4ff677ddc6844a3740d  $archive" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/trader-pro-r99"
           unzip -q "$archive" -d "$RUNNER_TEMP/trader-pro-r99"
+          patch --directory="$RUNNER_TEMP/trader-pro-r99" --strip=1   "$GITHUB_WORKSPACE/ci/patches/postgres-integration-state-fixes.patch"
           test -f "$RUNNER_TEMP/trader-pro-r99/alembic.ini"
           test -f "$RUNNER_TEMP/trader-pro-r99/scripts/verify_postgres.sh"
           test -f "$RUNNER_TEMP/trader-pro-r99/tests/test_postgres_integration.py"
