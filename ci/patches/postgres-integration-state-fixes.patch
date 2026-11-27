@@ -1,0 +1,70 @@
+--- a/tests/test_postgres_integration.py
++++ b/tests/test_postgres_integration.py
+@@ -252,14 +252,29 @@
+ 
+ def test_postgres_atomic_order_claim_obeys_locked_durable_pause():
+     from db.order_repository import OrderRepository
+-    from db.models import OrderRecord, RiskControlStateRecord, AuditEventRecord
++    from db.models import (OrderRecord, RiskControlStateRecord, AuditEventRecord,
++                           ReconciliationRunRecord, SystemSafetyStateRecord)
+ 
+     engine = _engine()
+     Session = sessionmaker(engine, expire_on_commit=False)
+     repo = OrderRepository(Session)
+     client_id = f"pg-paused-claim-{uuid.uuid4().hex}"
+     marker = f"pg-paused-claim-reason-{uuid.uuid4().hex}"
++    proof_id = f"pg-paused-proof-{uuid.uuid4().hex}"
+     try:
++        # The migration intentionally starts in RECONCILING (fail closed).
++        # Move to READY only through the same one-use persisted Paper proof
++        # required in production, then exercise the independent durable pause.
++        repo.record_reconciliation_run(
++            run_id=proof_id, source="paper", status="succeeded",
++            snapshot_complete=True, unresolved_count=0,
++            orders_seen=0, fills_seen=0, positions_seen=0,
++            evidence_hash=hashlib.sha256(proof_id.encode()).hexdigest(), details={},
++        )
++        repo.transition_system_safety_state(
++            status="READY", reason="PostgreSQL durable-pause test precondition",
++            actor="operator", reconciliation_run_id=proof_id,
++        )
+         repo.set_operational_pause(paused=True, reason=marker, actor="pg_claim_test")
+         with pytest.raises(PermissionError):
+             repo.stage_order_if_trading_enabled(client_order_id=client_id,
+@@ -274,6 +289,16 @@
+             assert blocked.details["gate"] == "DURABLE_PAUSE_ATOMIC_CLAIM"
+     finally:
+         with Session.begin() as session:
++            # Clear the restrictive FK before deleting the one-use proof.
++            safety = session.get(SystemSafetyStateRecord, 1)
++            if safety is not None:
++                safety.status, safety.reason, safety.actor = "RECONCILING", "PostgreSQL pause test cleanup", "test"
++                safety.last_reconciliation_run_id = None
++            session.flush()
++            proof = session.scalar(select(ReconciliationRunRecord).where(
++                ReconciliationRunRecord.run_id == proof_id))
++            if proof is not None:
++                session.delete(proof)
+             row = session.get(RiskControlStateRecord, 1)
+             if row is not None:
+                 row.paused, row.reason, row.actor = False, None, "system"
+@@ -488,14 +513,17 @@
+             assert safety.status == "READY"
+     finally:
+         with Session.begin() as session:
+-            proof = session.scalar(select(ReconciliationRunRecord).where(
+-            ReconciliationRunRecord.run_id == run_id))
+-            if proof is not None:
+-                session.delete(proof)
+             safety = session.get(SystemSafetyStateRecord, 1)
+             if safety is not None:
+                 safety.status, safety.reason, safety.actor = "RECONCILING", "PostgreSQL test cleanup", "test"
++                # The proof is referenced with ON DELETE RESTRICT. Clear the
++                # FK and flush before deleting the consumed test evidence.
+                 safety.last_reconciliation_run_id = None
++            session.flush()
++            proof = session.scalar(select(ReconciliationRunRecord).where(
++                ReconciliationRunRecord.run_id == run_id))
++            if proof is not None:
++                session.delete(proof)
+ engine.dispose()
