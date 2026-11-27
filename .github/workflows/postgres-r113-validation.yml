@@ -44,7 +44,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify R99 archive and prepare source
+      - name: Verify R99 archive, reconstruct R113 overlay and apply test fixes
         shell: bash
         env:
           APPLY_R113_OVERLAY: ${{ inputs.apply_r113_overlay || (github.event_name == 'push') }}
@@ -57,8 +57,10 @@ jobs:
           if [[ "$APPLY_R113_OVERLAY" == "true" ]]; then
             cat "$GITHUB_WORKSPACE"/ci/overlay-r113/part-*.b64 | base64 --decode > "$RUNNER_TEMP/r113-overlay.tar.xz"
             echo "fe40bf6be7c81faca3d0eecf5fecf0de6cdc2eae0c6d7651074182c38992c77f  $RUNNER_TEMP/r113-overlay.tar.xz" | sha256sum -c -
+            xz -t "$RUNNER_TEMP/r113-overlay.tar.xz"
             tar -xJf "$RUNNER_TEMP/r113-overlay.tar.xz" -C "$RUNNER_TEMP/trader-pro-source"
           fi
+          patch --directory="$RUNNER_TEMP/trader-pro-source" --strip=1
           test -f "$RUNNER_TEMP/trader-pro-source/alembic.ini"
           test -f "$RUNNER_TEMP/trader-pro-source/scripts/verify_postgres.sh"
           test -f "$RUNNER_TEMP/trader-pro-source/tests/test_postgres_integration.py"
@@ -89,18 +91,6 @@ jobs:
             sleep 2
           done
           createdb --host=127.0.0.1 --port=5432 --username=trader_pro trader_pro_restore
-
-      - name: Execute backup script against disposable PostgreSQL
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$TRADER_PRO_SOURCE"
-          mkdir -p "$RUNNER_TEMP/postgres-backups"
-          DATABASE_URL="$TRADER_PRO_TEST_DATABASE_URL" BACKUP_DIR="$RUNNER_TEMP/postgres-backups" bash scripts/backup_postgres.sh | tee "$GITHUB_WORKSPACE/postgres-backup.log"
-          backup_file="$(find "$RUNNER_TEMP/postgres-backups" -maxdepth 1 -type f -name '*.dump' -print -quit)"
-          test -n "$backup_file"
-          (cd "$(dirname "$backup_file")" && sha256sum -c "$(basename "$backup_file").sha256")
-          pg_restore --list "$backup_file" >/dev/null
 
       - name: Run Alembic, PostgreSQL integration, backup, restore and content verification
         shell: bash
